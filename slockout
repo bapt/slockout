@@ -1,0 +1,67 @@
+#!/bin/sh
+
+if [ $# -ne 2 ]; then
+	echo "usage: slockout <pf|ipfw> <tablename>" >&2
+	exit 1
+fi
+table=$2
+
+case $1 in
+pf)
+	alias fwadd="pfctl -t $table -T add"
+	fwdel="pfctl -t $table -T delete"
+	;;
+ipfw)
+	alias fwadd="ipfw table $table add"
+	fwdel="ipfw table $table delete"
+	;;
+esac
+
+while read m d h H tag msg; do
+case $tag in
+*sshd*)
+	case "$msg" in
+	*Did\ not\ receive\ identification\ string*|*Failed\ password\ for*|*Illegal\ user*|*Invalid\ user*|*Postponed\ keyboard-interactive*)
+		set -- $msg
+		while [ $# -ne 0 ]; do
+			if [ $1 = "from" ]; then
+				ip=$2
+				lockf -k /tmp/lockout.ssh.$ip echo $ip >> /tmp/lockout.ssh.$ip
+				num=$(wc -l /tmp/lockout.ssh.$ip | awk '{ print $1 }')
+				if [ $num -ge 10 ]; then	
+					fwadd $ip
+					lockf /tmp/lockout.ssh.$ip :> /tmp/lockout.ssh.$ip
+					echo "$fwdel $ip >/dev/null" | at now + 1 day
+				fi
+				break
+			fi
+			shift
+		done
+	;;
+	esac
+;;
+*postfix/smtpd*)
+	case "$msg" in
+	*lost\ connection\ after\ AUTH*)
+	set -- $msg
+	while [ $# -ne 0 ]; do
+		if [ "$1" = "from" ]; then
+			ip=${2#*\[}
+			ip=${ip%]*}
+			lockf -k /tmp/lockout.postfix.$ip echo $ip >> /tmp/lockout.postfix.$ip
+			num=$(wc -l /tmp/lockout.postfix.$ip | awk '{ print $1 }')
+			if [ $num -ge 10 ]; then
+				fwadd $ip
+				lockf /tmp/lockout.postfix.$ip :> /tmp/lockout.postfix.$ip
+				echo "$fwdel $ip >/dev/null" | at now + 1 day
+			fi
+			break
+		fi
+		shift
+	done
+	;;
+	esac
+;;
+*) ;;
+esac
+done
